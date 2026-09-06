@@ -21,6 +21,8 @@ final class ClipRecorder: Sendable {
     var isRecording = false
     var shouldAcceptNewFrames = false
     var isRotating = false
+    var lastPTS: CMTime?
+    var format: CMFormatDescription?
   }
 
   private let state = OSAllocatedUnfairLock(uncheckedState: State())
@@ -48,41 +50,71 @@ final class ClipRecorder: Sendable {
   }
 
   func append(_ sampleBuffer: CMSampleBuffer) {
-    let (recording, start, shouldAccept, rotating) = state.withLockUnchecked {
-      ($0.isRecording, $0.recordingStartTime, $0.shouldAcceptNewFrames, $0.isRotating)
+    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    let format = CMSampleBufferGetFormatDescription(sampleBuffer)
+    let snapshot = state.withLockUnchecked {
+      (
+        recording: $0.isRecording,
+        start: $0.recordingStartTime,
+        shouldAccept: $0.shouldAcceptNewFrames,
+        rotating: $0.isRotating,
+        lastPTS: $0.lastPTS,
+        format: $0.format,
+        writerFailed: $0.videoHandler?.hasFailed ?? false
+      )
     }
-    if rotating { return }
+    if snapshot.rotating { return }
 
-    if recording, let start, Date().timeIntervalSince(start) >= maxSegment, sampleBuffer.isHEVCKeyframe() {
-      Task { await rotate() }
+    let wallExpired = snapshot.recording && snapshot.start.map { Date().timeIntervalSince($0) >= maxSegment } == true
+    let ptsJump: Bool = {
+      guard snapshot.recording, let last = snapshot.lastPTS, pts.isValid, last.isValid else { return false }
+      let delta = CMTimeGetSeconds(CMTimeSubtract(pts, last))
+      return delta.isFinite && (delta < -0.05 || delta > 2)
+    }()
+    let formatChanged: Bool = {
+      guard snapshot.recording, let current = format, let previous = snapshot.format else { return false }
+      return CMFormatDescriptionEqual(current, otherFormatDescription: previous) == false
+    }()
+    let needsNewFile = snapshot.writerFailed || wallExpired || ptsJump || formatChanged
+    if needsNewFile {
+      if sampleBuffer.isHEVCKeyframe() {
+        let claimed = state.withLockUnchecked { state -> Bool in
+          guard !state.isRotating else { return false }
+          state.isRotating = true
+          return true
+        }
+        if claimed {
+          Task { await self.rotateThenContinue(sampleBuffer) }
+        }
+      }
       return
     }
 
-    if !recording {
-      guard shouldAccept, sampleBuffer.isHEVCKeyframe() else { return }
+    if !snapshot.recording {
+      guard snapshot.shouldAccept, sampleBuffer.isHEVCKeyframe() else { return }
       beginFile(with: sampleBuffer)
     }
 
     let handler = state.withLockUnchecked { $0.videoHandler }
-    handler?.appendVideoFrame(sampleBuffer)
+    if handler?.appendVideoFrame(sampleBuffer) == true {
+      state.withLockUnchecked {
+        $0.lastPTS = pts
+        if let format { $0.format = format }
+      }
+    }
   }
 
   func finishCurrentClip() async -> URL? {
     await finalize()
   }
 
-  private func rotate() async {
-    let started = state.withLockUnchecked { state -> Bool in
-      guard !state.isRotating else { return false }
-      state.isRotating = true
-      return true
-    }
-    guard started else { return }
+  private func rotateThenContinue(_ next: CMSampleBuffer) async {
     _ = await finalize()
     state.withLockUnchecked {
       $0.shouldAcceptNewFrames = true
       $0.isRotating = false
     }
+    append(next)
   }
 
   private func beginFile(with sampleBuffer: CMSampleBuffer) {
@@ -99,6 +131,7 @@ final class ClipRecorder: Sendable {
 
     do {
       let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+      writer.movieFragmentInterval = CMTime(seconds: 1, preferredTimescale: 600)
       let handler = VideoCaptureHandler(writer: writer, sourceFormatHint: format)
       guard writer.startWriting() else {
         Self.logger.error("Asset writer failed to start")
@@ -106,12 +139,15 @@ final class ClipRecorder: Sendable {
       }
       writer.startSession(atSourceTime: .zero)
       let start = Date()
+      let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
       state.withLockUnchecked { state in
         state.assetWriter = writer
         state.videoHandler = handler
         state.outputURL = url
         state.recordingStartTime = start
         state.isRecording = true
+        state.lastPTS = pts
+        state.format = format
       }
       handler.start()
     } catch {
@@ -120,10 +156,10 @@ final class ClipRecorder: Sendable {
   }
 
   private func finalize() async -> URL? {
-    let (shouldStop, url, handler, writer) = state.withLockUnchecked { state -> (Bool, URL?, VideoCaptureHandler?, AVAssetWriter?) in
-      guard state.isRecording else { return (false, nil, nil, nil) }
+    let (shouldStop, url, handler, writer, start) = state.withLockUnchecked { state -> (Bool, URL?, VideoCaptureHandler?, AVAssetWriter?, Date?) in
+      guard state.isRecording else { return (false, nil, nil, nil, nil) }
       state.isRecording = false
-      return (true, state.outputURL, state.videoHandler, state.assetWriter)
+      return (true, state.outputURL, state.videoHandler, state.assetWriter, state.recordingStartTime)
     }
     guard shouldStop else { return nil }
     handler?.stop()
@@ -136,14 +172,21 @@ final class ClipRecorder: Sendable {
       state.videoHandler = nil
       state.outputURL = nil
       state.recordingStartTime = nil
+      state.lastPTS = nil
+      state.format = nil
     }
     guard ok else {
       Self.logger.error("Writer did not finish (status \(writer.status.rawValue))")
       try? FileManager.default.removeItem(at: url)
       return nil
     }
-    await Self.saveToPhotos(url)
-    NotificationCenter.default.post(name: .glassesClipSaved, object: url)
+    let duration = start.map { Date().timeIntervalSince($0) } ?? 0
+    NotificationCenter.default.post(
+      name: .glassesClipSaved,
+      object: url,
+      userInfo: ["duration": duration]
+    )
+    Task { await Self.saveToPhotos(url) }
     return url
   }
 

@@ -28,6 +28,10 @@ final class VideoCaptureHandler: Sendable {
     }
   }
 
+  var hasFailed: Bool {
+    state.withLockUnchecked { $0.assetWriter?.status == .failed }
+  }
+
   func start() {
     state.withLockUnchecked { $0.isCapturing = true }
   }
@@ -39,10 +43,11 @@ final class VideoCaptureHandler: Sendable {
     }
   }
 
-  func appendVideoFrame(_ sampleBuffer: CMSampleBuffer) {
+  @discardableResult
+  func appendVideoFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {
     guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
       CMFormatDescriptionGetMediaType(formatDescription) == kCMMediaType_Video
-    else { return }
+    else { return false }
 
     let sourcePTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
     let sourceDTS = CMSampleBufferGetDecodeTimeStamp(sampleBuffer)
@@ -53,9 +58,9 @@ final class VideoCaptureHandler: Sendable {
       : CMTimeMake(value: 1, timescale: Self.fallbackFrameRate)
     let isSync = sampleBuffer.isHEVCKeyframe()
 
-    state.withLockUnchecked { state in
+    return state.withLockUnchecked { state in
       guard state.isCapturing, state.assetWriter?.status != .failed, state.videoInput.isReadyForMoreMediaData else {
-        return
+        return false
       }
 
       let timelineStart = state.streamStartTimestamp ?? sourcePTS
@@ -81,7 +86,7 @@ final class VideoCaptureHandler: Sendable {
           sampleTimingArray: &timingInfo,
           sampleBufferOut: &adjusted
         ) == noErr, let adjusted
-      else { return }
+      else { return false }
 
       if let attachments = CMSampleBufferGetSampleAttachmentsArray(adjusted, createIfNecessary: true) as? [NSMutableDictionary],
         let dict = attachments.first
@@ -90,9 +95,9 @@ final class VideoCaptureHandler: Sendable {
         dict[kCMSampleAttachmentKey_DependsOnOthers] = !isSync
       }
 
-      if state.videoInput.append(adjusted) {
-        state.lastOutputDTS = dts
-      }
+      guard state.videoInput.append(adjusted) else { return false }
+      state.lastOutputDTS = dts
+      return true
     }
   }
 }

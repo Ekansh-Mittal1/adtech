@@ -3,3 +3,8 @@
 xcuserdata/
 DerivedData/
 build/
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.pt
+BillboardDetect/output/

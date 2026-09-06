@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "billboard-detect"
+version = "0.1.0"
+description = "Detect and track billboards and ads in glasses video with YOLO-World or Grounding DINO."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "ultralytics>=8.3.0",
+  "supervision>=0.25.0,<0.31",
+  "opencv-python-headless>=4.8",
+  "torch>=2.2",
+  "numpy>=1.24",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dino = [
+  "transformers>=4.40",
+  "pillow>=10",
+]
+ocr = [
+  "rapidocr>=3.0",
+  "onnxruntime>=1.17",
+]
+ocr-vlm = [
+  "mlx-vlm>=0.1.11",
+  "pillow>=10",
+]
+
+[project.scripts]
+billboard-detect = "billboard_detect.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["billboard_detect*"]

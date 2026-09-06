@@ -9,9 +9,21 @@ struct ContentView: View {
         statusRow("Meta AI", controller.registrationLabel)
         statusRow("Session", String(describing: controller.sessionState))
         statusRow("Stream", String(describing: controller.streamState))
-        statusRow("Recording", controller.isRecording ? "saving clips" : "idle")
+        TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+          VStack(spacing: 20) {
+            statusRow("Recording", controller.isRecording ? "saving clips" : (controller.wantsCapture ? "starting next clip" : "idle"))
+            statusRow("This clip", controller.recordingElapsedLabel)
+          }
+        }
         statusRow("Clips on phone", "\(controller.clipCount)")
-        if !controller.lastClipName.isEmpty {
+        if let note = controller.statusNote {
+          Text(note)
+            .font(.subheadline)
+            .multilineTextAlignment(.center)
+            .padding(10)
+            .frame(maxWidth: .infinity)
+            .background(.green.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+        } else if !controller.lastClipName.isEmpty {
           Text(controller.lastClipName)
             .font(.footnote)
             .foregroundStyle(.secondary)
@@ -21,9 +33,9 @@ struct ContentView: View {
         Spacer()
 
         if controller.isRegistered {
-          Button(controller.isStreaming ? "Stop" : "Start capture") {
+          Button(controller.isCapturing ? "Stop" : "Start capture") {
             Task {
-              if controller.isStreaming {
+              if controller.isCapturing {
                 await controller.stopCapture()
               } else {
                 await controller.startCapture()
@@ -31,7 +43,7 @@ struct ContentView: View {
             }
           }
           .buttonStyle(.borderedProminent)
-          .tint(controller.isStreaming ? .red : .green)
+          .tint(controller.isCapturing ? .red : .green)
 
           Button("Disconnect glasses", role: .destructive) {
             controller.disconnect()
@@ -44,7 +56,7 @@ struct ContentView: View {
           .disabled(controller.registrationState == .registering)
         }
 
-        Text("Clips are stored in Files → On My iPhone → GlassesCapture, and copied to Photos. You can lock the phone or switch apps while capture is running. Swiping the app away stops it — iOS will not restart DAT.")
+        Text("The glasses camera often pauses around 1 minute. This app saves that clip, then starts the next one while the LED is still on. Files → On My iPhone → GlassesCapture, and Photos. Swiping the app away stops capture.")
           .font(.footnote)
           .foregroundStyle(.secondary)
           .multilineTextAlignment(.center)
